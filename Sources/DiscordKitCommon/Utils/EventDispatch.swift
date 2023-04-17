@@ -71,6 +71,15 @@ public class EventDispatch<Event>: EventDispatchProtocol {
             _ = self?.removeHandler(handler: id)
         }
     }
+    
+    /// Async wrapper for handleOnce()
+    public func handleNext() async -> Event {
+        return await withCheckedContinuation { continuation in
+            handleOnce() { result in
+                continuation.resume(returning: result)
+            }
+        }
+    }
 
     /// Removes a handler with a given identifier
     ///
