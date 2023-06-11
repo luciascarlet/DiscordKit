@@ -45,9 +45,6 @@ public struct User: Codable, GatewayData, Identifiable, Equatable {
     /// Display name of this user
     public let global_name: String?
 
-    /// User's Global Name
-    public let global_name: String?
-
     /// User's avatar hash
     public let avatar: HashedAsset?
 
@@ -118,9 +115,6 @@ public struct CurrentUser: Codable, GatewayData, Equatable {
     public let discriminator: String?
     
     /// Display name of this user
-    public let global_name: String?
-
-    /// Global Name of this user
     public let global_name: String?
 
     /// The flags of this user
