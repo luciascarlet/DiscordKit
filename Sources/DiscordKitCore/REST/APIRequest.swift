@@ -6,14 +6,25 @@
 //
 
 import Foundation
-import DiscordKitCommon
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Utility wrappers for easy request-making
 public extension DiscordREST {
+    enum RequestError: Error {
+        case unexpectedResponseCode(_ code: Int)
+        case invalidResponse
+        case superEncodeFailure
+        case jsonDecodingError(error: Error) // This is not strongly typed because it was simpler to just use one catch
+        case genericError(reason: String)
+    }
+
     /// The few supported request methods
     enum RequestMethod: String {
         case get = "GET"
         case post = "POST"
+        case put = "PUT"
         case delete = "DELETE"
         case patch = "PATCH"
     }
@@ -41,43 +52,42 @@ public extension DiscordREST {
         attachments: [URL] = [],
         body: Data? = nil,
         method: RequestMethod = .get
-    ) async throws -> Data? {
-        guard let token = token else {
-            DiscordREST.log.error("Not making request without token. Call setToken(token:) to set a token.")
-            return nil
-        }
+    ) async throws -> Data {
+        assert(token != nil, "Token should not be nil. Please set a token before using the REST API.")
+        let token = token! // Force unwrapping is appropriete here
 
-        DiscordREST.log.debug("\(method.rawValue): \(path)")
+        Self.log.trace("Making request", metadata: [
+            "method": "\(method)",
+            "path": "\(path)"
+        ])
 
-        guard var apiURL = URL(string: GatewayConfig.default.restBase) else { return nil }
-        apiURL.appendPathComponent(path, isDirectory: false)
+        let apiURL = DiscordKitConfig.default.restBase.appendingPathComponent(path, isDirectory: false)
 
         // Add query params (if any)
-        var urlBuilder = URLComponents(url: apiURL, resolvingAgainstBaseURL: true)
-        urlBuilder?.queryItems = query
-        guard let reqURL = urlBuilder?.url else { return nil }
+        var urlBuilder = URLComponents(url: apiURL, resolvingAgainstBaseURL: true)!
+        urlBuilder.queryItems = query
+        let reqURL = urlBuilder.url!
 
         // Create URLRequest and set headers
         var req = URLRequest(url: reqURL)
         req.httpMethod = method.rawValue
-        req.setValue(token, forHTTPHeaderField: "authorization")
-        req.setValue(GatewayConfig.default.baseURL, forHTTPHeaderField: "origin")
+        req.setValue(DiscordKitConfig.default.isBot ? "Bot \(token)" : token, forHTTPHeaderField: "authorization")
+        req.setValue(DiscordKitConfig.default.baseURL.absoluteString, forHTTPHeaderField: "origin")
 
         // These headers are to match headers present in actual requests from the official client
         // req.setValue("?0", forHTTPHeaderField: "sec-ch-ua-mobile") // The day this runs on iOS...
         // req.setValue("macOS", forHTTPHeaderField: "sec-ch-ua-platform") // We only run on macOS
         // The top 2 headers are only sent when running in browsers
-        req.setValue(DiscordREST.userAgent, forHTTPHeaderField: "user-agent")
+        req.setValue(DiscordKitConfig.default.userAgent, forHTTPHeaderField: "user-agent")
         req.setValue("cors", forHTTPHeaderField: "sec-fetch-mode")
         req.setValue("same-origin", forHTTPHeaderField: "sec-fetch-site")
         req.setValue("empty", forHTTPHeaderField: "sec-fetch-dest")
 
         req.setValue(Locale.englishUS.rawValue, forHTTPHeaderField: "x-discord-locale")
         req.setValue("bugReporterEnabled", forHTTPHeaderField: "x-debug-options")
-        guard let superEncoded = try? DiscordREST.encoder.encode(DiscordREST.getSuperProperties())
-        else {
-            Self.log.error("Couldn't encode super properties, something is seriously wrong")
-            return nil
+        guard let superEncoded = try? DiscordREST.encoder.encode(DiscordKitConfig.default.properties) else {
+            assertionFailure("Couldn't encode super properties for request")
+            throw RequestError.superEncodeFailure
         }
         req.setValue(superEncoded.base64EncodedString(), forHTTPHeaderField: "x-super-properties")
 
@@ -92,12 +102,14 @@ public extension DiscordREST {
         }
 
         // Make request
-        let (data, response) = try await DiscordREST.session.data(for: req)
-        guard let httpResponse = response as? HTTPURLResponse else { return nil }
+        guard let (data, response) = try? await DiscordREST.session.data(for: req),
+              let httpResponse = response as? HTTPURLResponse else {
+            throw RequestError.invalidResponse
+        }
         guard httpResponse.statusCode / 100 == 2 else { // Check if status code is 2**
-            DiscordREST.log.warning("Status code is not 2xx: \(httpResponse.statusCode, privacy: .public)")
-            DiscordREST.log.warning("Response: \(String(decoding: data, as: UTF8.self), privacy: .public)")
-            return nil
+            Self.log.error("Response status code not 2xx", metadata: ["res.statusCode": "\(httpResponse.statusCode)"])
+            Self.log.debug("Raw response: \(String(decoding: data, as: UTF8.self))")
+            throw RequestError.unexpectedResponseCode(httpResponse.statusCode)
         }
 
         return data
@@ -117,28 +129,14 @@ public extension DiscordREST {
     func getReq<T: Decodable>(
         path: String,
         query: [URLQueryItem] = []
-    ) async -> T? {
+    ) async throws -> T {
         // This helps debug JSON decoding errors
+        let respData = try await makeRequest(path: path, query: query)
         do {
-            guard let d = try? await makeRequest(path: path, query: query)
-            else { return nil }
-
-            return try DiscordREST.decoder.decode(T.self, from: d)
-        } catch let DecodingError.dataCorrupted(context) {
-            print(context.debugDescription)
-        } catch let DecodingError.keyNotFound(key, context) {
-            print("Key '\(key)' not found:", context.debugDescription)
-            print("codingPath:", context.codingPath)
-        } catch let DecodingError.valueNotFound(value, context) {
-            print("Value '\(value)' not found:", context.debugDescription)
-            print("codingPath:", context.codingPath)
-        } catch let DecodingError.typeMismatch(type, context) {
-            print("Type '\(type)' mismatch:", context.debugDescription)
-            print("codingPath:", context.codingPath)
+            return try DiscordREST.decoder.decode(T.self, from: respData)
         } catch {
-            print("error: ", error)
+            throw RequestError.jsonDecodingError(error: error)
         }
-        return nil
     }
 
     /// Make a `POST` request to the Discord REST API
@@ -146,51 +144,95 @@ public extension DiscordREST {
         path: String,
         body: B? = nil,
         attachments: [URL] = []
-    ) async -> D? {
-        let p = body != nil ? try? DiscordREST.encoder.encode(body) : nil
-        guard let d = try? await makeRequest(
+    ) async throws -> D {
+        let payload = body != nil ? try DiscordREST.encoder.encode(body) : nil
+        let respData = try await makeRequest(
             path: path,
             attachments: attachments,
-            body: p,
+            body: payload,
             method: .post
         )
-        else { return nil }
-
-        return try? DiscordREST.decoder.decode(D.self, from: d)
+        do {
+            return try DiscordREST.decoder.decode(D.self, from: respData)
+        } catch {
+            throw RequestError.jsonDecodingError(error: error)
+        }
     }
-    
+
     /// Make a `POST` request to the Discord REST API
     ///
     /// For endpoints that returns a 204 empty response
     func postReq<B: Encodable>(
         path: String,
         body: B
-    ) async -> Bool {
-        let p = try? DiscordREST.encoder.encode(body)
-        guard (try? await makeRequest(
+    ) async throws {
+        let payload = try DiscordREST.encoder.encode(body)
+        _ = try await makeRequest(
             path: path,
-            body: p,
+            body: payload,
             method: .post
-        )) != nil
-        else { return false }
-        return true
+        )
     }
 
     /// Make a `POST` request to the Discord REST API, for endpoints
     /// that both require no payload and returns a 204 empty response
-    func emptyPostReq(path: String) async -> Bool {
-        guard (try? await makeRequest(
+    func postReq(path: String) async throws {
+        _ = try await makeRequest(
             path: path,
             body: nil,
             method: .post
-        )) != nil
-        else { return false }
-        return true
+        )
+    }
+
+    /// Make a `PUT` request to the Discord REST API
+    func putReq<B: Encodable, Response: Decodable>(
+        path: String,
+        body: B
+    ) async throws -> Response {
+        let payload = try DiscordREST.encoder.encode(body)
+        let data = try await makeRequest(
+            path: path,
+            body: payload,
+            method: .put
+        )
+        do {
+            return try DiscordREST.decoder.decode(Response.self, from: data)
+        } catch {
+            throw RequestError.jsonDecodingError(error: error)
+        }
+    }
+
+    /// Make a `PUT` request to the Discord REST API
+    ///
+    /// For endpoints that returns a 204 empty response
+    func putReq<B: Encodable>(
+        path: String,
+        body: B
+    ) async throws {
+        let payload = try DiscordREST.encoder.encode(body)
+        _ = try await makeRequest(
+            path: path,
+            body: payload,
+            method: .put
+        )
+    }
+
+    /// Make a `PUT` request to the Discord REST API
+    ///
+    /// For endpoints that returns a 204 empty response and doesn't have any body
+    func putReq(
+        path: String
+    ) async throws {
+        _ = try await makeRequest(
+            path: path,
+            body: nil,
+            method: .put
+        )
     }
 
     /// Make a `DELETE` request to the Discord REST API
-    func deleteReq(path: String) async -> Bool {
-        return (try? await makeRequest(path: path, method: .delete)) != nil
+    func deleteReq(path: String) async throws {
+        _ = try await makeRequest(path: path, method: .delete)
     }
 
     /// Make a `PATCH` request to the Discord REST API
@@ -200,14 +242,17 @@ public extension DiscordREST {
     func patchReq<B: Encodable>(
         path: String,
         body: B
-    ) async -> Bool {
-        let p = try? DiscordREST.encoder.encode(body)
-        guard (try? await makeRequest(
+    ) async throws {
+        let payload: Data?
+        payload = try? DiscordREST.encoder.encode(body)
+        _ = try await makeRequest(
             path: path,
-            body: p,
+            body: payload,
             method: .patch
-        )) != nil
-        else { return false }
-        return true
+        )
+    }
+
+    func patchReq(path: String) async throws {
+        _ = try await makeRequest(path: path, body: nil, method: .patch)
     }
 }

@@ -8,68 +8,117 @@
 //  and not meant for external use
 
 import Foundation
-import DiscordKitCommon
 
-/// Connection properties used to construct client info that is sent
-/// in the ``GatewayIdentify`` payload
-struct GatewayConnProperties: OutgoingGatewayData {
-    /// OS the client is running on
-    ///
-    /// Always `Mac OS X`
-    let os: String
+public protocol GatewayData: Decodable {}
+public protocol OutgoingGatewayData: Encodable {}
 
-    /// Browser name
-    ///
-    /// Observed values were `Chrome` when running on Google Chrome and
-    /// `Discord Client` when running in the desktop client.
-    ///
-    /// > For now, this value is hardcoded to `Discord Client` in the
-    /// > ``DiscordAPI/getSuperProperties()`` method. Customisability
-    /// > might be added in a future release.
-    let browser: String
+/// Presence Update
+///
+/// Sent to update the presence of the current client.
+///
+/// > Outgoing Gateway data struct for opcode 3
+public struct GatewayPresenceUpdate: OutgoingGatewayData {
+    public init(since: Int, activities: [ActivityOutgoing], status: PresenceStatus, afk: Bool) {
+        self.since = since
+        self.activities = activities
+        self.status = status
+        self.afk = afk
+    }
 
-    /// Release channel of target official client
-    ///
-    /// Refer to ``GatewayConfig/clientParity`` for more details.
-    let release_channel: String?
+    public let since: Int // Unix time (in milliseconds) of when the client went idle, or null if the client is not idle
+    public let activities: [ActivityOutgoing]
+    public let status: PresenceStatus
+    public let afk: Bool
+}
 
-    /// Version of target official client
-    ///
-    /// Refer to ``GatewayConfig/clientParity`` for more details.
-    let client_version: String?
+/// Voice State Update
+///
+/// Sent to update the client's voice, deaf and video state.
+///
+/// > Outgoing Gateway data struct for opcode 4
+public struct GatewayVoiceStateUpdate: OutgoingGatewayData, GatewayData {
+    public let guild_id: Snowflake?
+    public let channel_id: Snowflake? // ID of the voice channel client wants to join (null if disconnecting)
+    public let self_mute: Bool
+    public let self_deaf: Bool
+    public let self_video: Bool?
 
-    /// OS version
-    ///
-    /// The version of the OS the client is running on. This is dynamically
-    /// retrieved in ``DiscordAPI/getSuperProperties()`` by calling `uname()`.
-    /// For macOS, it is the version of the Darwin Kernel, which is `21.4.0`
-    /// as of macOS `12.3`.
-    let os_version: String?
+    public init(guild_id: Snowflake?, channel_id: Snowflake?, self_mute: Bool, self_deaf: Bool, self_video: Bool?) {
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.self_mute = self_mute
+        self.self_deaf = self_deaf
+        self.self_video = self_video
+    }
 
-    /// Machine arch
-    ///
-    /// The arch of the machine the client is running on. This is dynamically
-    /// retrieved in ``DiscordAPI/getSuperProperties()`` by calling `uname()`.
-    /// For macOS, it could be either `x86_64` (Intel) or `arm64` (Apple Silicon).
-    let os_arch: String?
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        // Encoding containers directly so nil optionals get encoded as "null" and not just removed
+        try container.encode(self_mute, forKey: .self_mute)
+        try container.encode(self_deaf, forKey: .self_deaf)
+        try container.encode(self_video, forKey: .self_video)
+        try container.encode(channel_id, forKey: .channel_id)
+        try container.encode(guild_id, forKey: .guild_id)
+    }
+}
 
-    /// System locale
-    ///
-    /// The locale (language) of the system. This is hardcoded to be `en-US` for now.
-    let system_locale: String?
+/// Guild Request Members
+///
+/// > Outgoing Gateway data struct for opcode 8
+public struct GatewayGuildRequestMembers: GatewayData {
+    public let guild_id: Snowflake
+    public let query: String?
+    public let limit: Int
+    public let presences: Bool? // Used to specify if we want the presences of the matched members
+    public let user_ids: [Snowflake]? // Used to specify which users you wish to fetch
+    public let nonce: String? // Nonce to identify the Guild Members Chunk response
+}
 
-    /// Build number of target official client
+/// Gateway Hello
+///
+/// > Incoming Gateway data struct for opcode 10
+public struct GatewayHello: GatewayData {
+    /// Interval between outgoing heartbeats, in ms
     ///
-    /// Refer to ``GatewayConfig/clientParity`` for more details.
-    let client_build_number: Int?
+    /// The Gateway has an approx 25% time tolerance to delayed heartbeats,
+    /// that is, it will close the connection if no heartbeat is received after
+    /// ``heartbeat_interval``\*125% ms from the last received heartbeat.
+    /// As per official docs, the first heartbeat should be sent
+    /// ``heartbeat_interval``\*[0...1] ms after receiving the ``GatewayHello``
+    /// payload, where [0...1] is a random double from 0-1.
+    public let heartbeat_interval: Int
+}
+
+/// Subscribe Guild Events
+///
+/// > Outgoing Gateway data struct for opcode 11
+public struct SubscribeGuildEvts: OutgoingGatewayData {
+    public let guild_id: Snowflake
+    public let typing: Bool?
+    public let activities: Bool?
+    public let threads: Bool?
+    public let members: [Snowflake]?
+
+    public init(guild_id: Snowflake, typing: Bool? = nil, activities: Bool? = nil, threads: Bool? = nil, members: [Snowflake]? = nil) {
+        self.guild_id = guild_id
+        self.typing = typing
+        self.activities = activities
+        self.threads = threads
+        self.members = members
+    }
 }
 
 /// Current client state, sent with the ``GatewayIdentify`` payload
 ///
 /// > Warning: This should only be sent in identify payloads for user accounts. Bot accounts don't need this!
 struct ClientState: OutgoingGatewayData {
-    let guild_hashes: GuildHashes
+    struct GuildVersion: OutgoingGatewayData { }
+
+    let api_code_version: Int
+    let guild_versions: GuildVersion
     let highest_last_message_id: Snowflake
+    let initial_guild_id: Snowflake?
+    let private_channels_version: String
     let read_state_version: Int
     let user_guild_settings_version: Int
     let user_settings_version: Int
@@ -102,7 +151,7 @@ struct GatewayHeartbeat: OutgoingGatewayData {
 /// Gateway Identify
 ///
 /// Sent every ``GatewayHello/heartbeat_interval``, to prevent the Gateway
-/// from closing the connection and
+/// from closing the connection
 ///
 /// > Outgoing Gateway data struct for opcode 1
 struct GatewayIdentify: OutgoingGatewayData {
@@ -113,7 +162,8 @@ struct GatewayIdentify: OutgoingGatewayData {
     let shard: [Int]? // Array of two integers (shard_id, num_shards)
     let presence: GatewayPresenceUpdate?
     let client_state: ClientState?
-    let capabilities: Int
+    let capabilities: Int? // Must be set for user accounts
+    let intents: Intents?
 }
 
 /// Gateway Resume

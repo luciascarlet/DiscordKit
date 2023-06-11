@@ -1,12 +1,11 @@
 //
-//  File.swift
+//  ResolvedInvite.swift
 //  
 //
 //  Created by Vincent Kwok on 10/7/22.
 //
 
 import Foundation
-import DiscordKitCommon
 
 public enum InviteTargetType: Int, Codable {
     case stream = 1
@@ -19,7 +18,7 @@ public enum InviteTargetType: Int, Codable {
 public struct Invite: Decodable {
     /// The invite code (unique ID)
     public let code: String
-    /// The guild this invite is for
+    // The guild this invite is for
     // public let guild: Guild?
     /// The channel this invite is for
     public let channel: Channel?
